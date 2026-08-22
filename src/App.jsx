@@ -905,9 +905,10 @@ const Dashboard = ({ trucks, queue, onReset, lane, detailMap, title, myPlate, si
     return dt ? Math.round((dt - Date.now()) / 60000) : Infinity;
   };
   const usedDash = new Set();
+  const queueIdsDash = new Set(queue.map(q => q.id));
   const matchTruckDash = q => {
     let t = trucks.find(t => t.queueId === q.id && !usedDash.has(t.id));
-    if (!t) t = trucks.find(t => !t.queueId && plateNum(t.plate) === plateNum(q.plate) && plateNum(q.plate) !== "" && !usedDash.has(t.id));
+    if (!t) t = trucks.find(t => (!t.queueId || !queueIdsDash.has(t.queueId)) && plateNum(t.plate) === plateNum(q.plate) && plateNum(q.plate) !== "" && !usedDash.has(t.id));
     if (t) usedDash.add(t.id);
     return t;
   };
@@ -1576,9 +1577,10 @@ const Picking = ({ trucks, queue, onUpdate, detailMapByChannel = {} }) => {
   // รวม queue + walk-in (รถที่เข้าแล้วแต่ยังไม่มีในคิว)
   const plateNum = s => (String(s).match(/\d+/g) || []).pop() || "";
   const usedPick = new Set();
+  const queueIdsPick = new Set(queue.map(q => q.id));
   const matchTruckPick = q => {
     let t = trucks.find(t => t.queueId === q.id && !usedPick.has(t.id));
-    if (!t) t = trucks.find(t => !t.queueId && plateNum(t.plate) === plateNum(q.plate) && plateNum(q.plate) !== "" && !usedPick.has(t.id));
+    if (!t) t = trucks.find(t => (!t.queueId || !queueIdsPick.has(t.queueId)) && plateNum(t.plate) === plateNum(q.plate) && plateNum(q.plate) !== "" && !usedPick.has(t.id));
     if (t) usedPick.add(t.id);
     return t;
   };
@@ -3101,9 +3103,10 @@ const WaitingSummary = ({ trucks }) => {
 const Planning = ({ trucks, queue, onUpdate }) => {
   const plateNum = s => (String(s).match(/\d+/g) || []).pop() || "";
   const usedPlan = new Set();
+  const queueIdsPlan = new Set(queue.map(q => q.id));
   const matchTruckPlan = q => {
     let t = trucks.find(t => t.queueId === q.id && !usedPlan.has(t.id));
-    if (!t) t = trucks.find(t => !t.queueId && plateNum(t.plate) === plateNum(q.plate) && plateNum(q.plate) !== "" && !usedPlan.has(t.id));
+    if (!t) t = trucks.find(t => (!t.queueId || !queueIdsPlan.has(t.queueId)) && plateNum(t.plate) === plateNum(q.plate) && plateNum(q.plate) !== "" && !usedPlan.has(t.id));
     if (t) usedPlan.add(t.id);
     return t;
   };
@@ -5815,13 +5818,26 @@ export default function App() {
     }
     setQueue(newQueue);
     // merge walk-in trucks กับ queue entries แบบ one-to-one เรียงตาม seq
+    // ดึง trucks สดจาก Supabase แทนการใช้ state ในเครื่อง เพราะรถอาจเพิ่งเช็คอินจากอุปกรณ์อื่น
+    // ที่ realtime ยังไม่ sync มาถึง browser ที่กำลังอัปโหลด/แก้ไขคิวนี้ — ถ้าใช้ state เก่าจะ relink ไม่ครบ
+    const { data: freshTrucksRows, error: fetchErr } = await supabase.from("wh_trucks").select("*");
+    const freshTrucks = fetchErr ? trucks : freshTrucksRows.map(r => r.data);
     const sortedQueue = [...newQueue].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
     const usedQueueIds = new Set();
-    for (const truck of trucks) {
+    const relinked = [];
+    for (const truck of freshTrucks) {
       const match = sortedQueue.find(q => plateNum(q.plate) === plateNum(truck.plate) && plateNum(q.plate) !== "" && !usedQueueIds.has(q.id));
       if (!match) continue;
       usedQueueIds.add(match.id);
-      await supabase.from("wh_trucks").upsert({ id: truck.id, data: { ...truck, plate: match.plate, customerGroup: match.customerGroup, zone: match.zone, queueId: match.id, entryTime: match.entryTime, exitTime: match.exitTime } });
+      const updatedTruck = { ...truck, plate: match.plate, customerGroup: match.customerGroup, zone: match.zone, queueId: match.id, entryTime: match.entryTime, exitTime: match.exitTime };
+      await supabase.from("wh_trucks").upsert({ id: truck.id, data: updatedTruck });
+      relinked.push(updatedTruck);
+    }
+    if (relinked.length > 0) {
+      setTrucks(prev => {
+        const relinkedIds = new Set(relinked.map(t => t.id));
+        return [...prev.filter(t => !relinkedIds.has(t.id)), ...relinked];
+      });
     }
   };
 
